@@ -1,0 +1,14 @@
+.local/
+dist/
+**/.dart_tool/
+**/build/
+**/.flutter-plugins-dependencies
+**/windows/flutter/ephemeral/
+**/coverage/
+deploy/.env
+**/__pycache__/
+**/*.jks
+**/*.keystore
+**/*.p12
+**/*.pfx
+**/key.properties

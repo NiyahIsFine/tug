@@ -1,0 +1,7 @@
+.github/workflows/*.yml text eol=lf
+scripts/*.sh text eol=lf
+scripts/*.py text eol=lf
+deploy/Dockerfile text eol=lf
+client/windows/windows/flutter/generated_plugin_registrant.cc text eol=lf
+client/windows/windows/flutter/generated_plugin_registrant.h text eol=lf
+client/windows/windows/flutter/generated_plugins.cmake text eol=lf

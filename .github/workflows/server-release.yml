@@ -1,0 +1,94 @@
+name: Server release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - server/**
+      - scripts/build-server.sh
+      - scripts/package-server.sh
+      - scripts/release_policy.py
+      - scripts/component_version.py
+      - scripts/publish-release.py
+      - scripts/publish-image.py
+      - scripts/run-script-tests.py
+      - scripts/tests/shared/**
+      - scripts/tests/server/**
+      - .gitattributes
+      - .github/workflows/server-release.yml
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: server-release-${{ github.event.release.id || github.ref }}
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  build:
+    if: github.event_name != 'release' || !contains(fromJSON('["tug-pre-release", "tug-server-linux-pre-release", "tug-windows-pre-release", "tug-android-pre-release"]'), github.event.release.tag_name)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - name: Validate publication target
+        run: python3 scripts/release_policy.py --validate
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version: 1.26.2
+          cache-dependency-path: server/go.sum
+      - name: Test shared and Server release scripts
+        run: python3 scripts/run-script-tests.py server
+      - name: Test, vet and race
+        working-directory: server
+        run: |
+          go test ./...
+          go vet ./...
+          go test -race ./...
+      - name: Build and package both Linux architectures
+        run: |
+          sh scripts/build-server.sh
+          sh scripts/package-server.sh
+          cd dist/releases/server
+          sha256sum --check server-sha256.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: server-release-${{ github.sha }}
+          path: |
+            dist/releases/server/*.tar.gz
+            dist/releases/server/server-source.json
+            dist/releases/server/server-sha256.txt
+          if-no-files-found: error
+          retention-days: 14
+  publish:
+    needs: build
+    if: github.ref == 'refs/heads/main' || github.event_name == 'release'
+    concurrency:
+      group: tug-publish-${{ github.event.release.id || 'tug-server-linux-pre-release' }}
+      cancel-in-progress: false
+      queue: max
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: server-release-${{ github.sha }}
+          path: dist/releases/server
+      - name: Publish to the eligible rolling or original version release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TUG_MUTABLE_RELEASES_CONFIRMED: ${{ vars.TUG_MUTABLE_RELEASES_CONFIRMED }}
+        run: python3 scripts/publish-release.py server dist/releases/server

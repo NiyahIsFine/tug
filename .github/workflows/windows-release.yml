@@ -1,0 +1,116 @@
+name: Windows release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - client/core/**
+      - client/windows/**
+      - scripts/build-windows-client.ps1
+      - scripts/create-windows-icon.ps1
+      - scripts/package-windows-client.ps1
+      - scripts/release_policy.py
+      - scripts/component_version.py
+      - scripts/publish-release.py
+      - scripts/run-script-tests.py
+      - scripts/tests/shared/**
+      - scripts/tests/windows/**
+      - .gitattributes
+      - .github/workflows/windows-release.yml
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-release-${{ github.event.release.id || github.ref }}
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  build:
+    if: github.event_name != 'release' || !contains(fromJSON('["tug-pre-release", "tug-server-linux-pre-release", "tug-windows-pre-release", "tug-android-pre-release"]'), github.event.release.tag_name)
+    runs-on: windows-2022
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - name: Validate publication target
+        run: python scripts/release_policy.py --validate
+      - uses: subosito/flutter-action@fd55f4c5af5b953cc57a2be44cb082c8f6635e8e
+        with:
+          flutter-version: 3.47.7
+          channel: stable
+          cache: true
+          cache-key: 'tug-flutter-v1-:os:-:channel:-:version:-:arch:-:hash:'
+          pub-cache-key: 'tug-pub-v1-windows-:os:-:channel:-:version:-:arch:-:hash:'
+      - name: Test shared and Windows release scripts
+        run: python scripts/run-script-tests.py windows
+      - name: Resolve shared core and Windows dependencies
+        run: |
+          Push-Location client/core
+          try {
+            dart pub get --enforce-lockfile
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } finally { Pop-Location }
+          Push-Location client/windows
+          try {
+            flutter pub get --enforce-lockfile
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } finally { Pop-Location }
+      - name: Analyze and test shared core
+        working-directory: client/core
+        run: |
+          dart analyze
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          dart test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Analyze and test Windows host
+        working-directory: client/windows
+        run: |
+          flutter analyze --no-pub
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          flutter test --no-pub
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build complete x64 Release and package
+        run: |
+          ./scripts/build-windows-client.ps1 -FlutterRoot $env:FLUTTER_ROOT -NoPub
+          ./scripts/package-windows-client.ps1
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: windows-release-${{ github.sha }}
+          path: dist/releases/windows/*
+          if-no-files-found: error
+          retention-days: 14
+  publish:
+    needs: build
+    if: github.ref == 'refs/heads/main' || github.event_name == 'release'
+    concurrency:
+      group: tug-publish-${{ github.event.release.id || 'tug-windows-pre-release' }}
+      cancel-in-progress: false
+      queue: max
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: windows-release-${{ github.sha }}
+          path: dist/releases/windows
+      - name: Publish to the eligible rolling or original version release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TUG_MUTABLE_RELEASES_CONFIRMED: ${{ vars.TUG_MUTABLE_RELEASES_CONFIRMED }}
+        run: python3 scripts/publish-release.py windows dist/releases/windows

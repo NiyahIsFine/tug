@@ -1,0 +1,148 @@
+name: Server multi-platform image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - server/**
+      - deploy/Dockerfile
+      - .dockerignore
+      - scripts/release_policy.py
+      - scripts/component_version.py
+      - scripts/publish-image.py
+      - scripts/cleanup_image.py
+      - scripts/publish-release.py
+      - scripts/run-script-tests.py
+      - scripts/tests/shared/**
+      - scripts/tests/server/**
+      - scripts/smoke-server.py
+      - .gitattributes
+      - .github/workflows/server-image.yml
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: tug-server-image-publication
+  cancel-in-progress: false
+  queue: max
+
+env:
+  IMAGE: ghcr.io/niyahisfine/tug-server
+
+jobs:
+  image:
+    if: github.event_name != 'release' || !contains(fromJSON('["tug-pre-release", "tug-server-linux-pre-release", "tug-windows-pre-release", "tug-android-pre-release"]'), github.event.release.tag_name)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - name: Read server version
+        run: python3 scripts/component_version.py server --github-env
+      - name: Validate publication target and test shared and Server scripts
+        run: |
+          python3 scripts/release_policy.py --validate
+          python3 scripts/run-script-tests.py server
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version: 1.26.2
+          cache-dependency-path: server/go.sum
+      - name: Validate server before image publication
+        working-directory: server
+        run: |
+          go test ./...
+          go vet ./...
+          go test -race ./...
+      - uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392
+        with:
+          platforms: arm64
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435
+      - name: Build timestamp
+        id: date
+        run: echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+      - name: Build amd64 test image
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83
+        with:
+          context: .
+          file: deploy/Dockerfile
+          platforms: linux/amd64
+          load: true
+          tags: tug-test:amd64
+          build-args: |
+            VERSION=${{ env.VERSION }}
+            SOURCE_REPOSITORY=https://github.com/${{ github.repository }}
+            SOURCE_REVISION=${{ github.sha }}
+            BUILD_DATE=${{ steps.date.outputs.created }}
+          cache-from: type=gha,scope=server-amd64
+          cache-to: type=gha,mode=max,scope=server-amd64
+      - name: Build arm64 test image
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83
+        with:
+          context: .
+          file: deploy/Dockerfile
+          platforms: linux/arm64
+          load: true
+          tags: tug-test:arm64
+          build-args: |
+            VERSION=${{ env.VERSION }}
+            SOURCE_REPOSITORY=https://github.com/${{ github.repository }}
+            SOURCE_REVISION=${{ github.sha }}
+            BUILD_DATE=${{ steps.date.outputs.created }}
+          cache-from: type=gha,scope=server-arm64
+          cache-to: type=gha,mode=max,scope=server-arm64
+      - name: Smoke test both image architectures
+        run: |
+          for architecture in amd64 arm64; do
+            test "$(docker image inspect --format '{{.Architecture}}' "tug-test:$architecture")" = "$architecture"
+            test "$(docker run --rm --platform "linux/$architecture" "tug-test:$architecture" --version)" = "tug-server $VERSION"
+            python3 scripts/smoke-server.py --image "tug-test:$architecture" --platform "linux/$architecture"
+          done
+      - name: Check publication policy
+        id: policy
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/release_policy.py
+      - name: Authenticate to GHCR
+        if: steps.policy.outputs.publish == 'true'
+        uses: docker/login-action@184bdaa0721073962dff0199f1fb9940f07167d1
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Publish multi-platform image by digest
+        id: build
+        if: steps.policy.outputs.publish == 'true'
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83
+        with:
+          context: .
+          file: deploy/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          provenance: false
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          build-args: |
+            VERSION=${{ env.VERSION }}
+            SOURCE_REPOSITORY=https://github.com/${{ github.repository }}
+            SOURCE_REVISION=${{ github.sha }}
+            BUILD_DATE=${{ steps.date.outputs.created }}
+          cache-from: |
+            type=gha,scope=server-amd64
+            type=gha,scope=server-arm64
+      - name: Verify manifest and publish the eligible target image tag
+        id: publish
+        if: steps.policy.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: python3 scripts/publish-image.py "$IMAGE" "$DIGEST"
+      - name: Delete untagged package versions no longer referenced by retained images
+        if: steps.publish.outputs.published == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/cleanup_image.py "$IMAGE" --execute

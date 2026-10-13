@@ -1,0 +1,21 @@
+services:
+  tug:
+    image: ${TUG_IMAGE:-ghcr.io/niyahisfine/tug-server:tug-pre-release}
+    restart: unless-stopped
+    ports:
+      - "16640:16640"
+    environment:
+      TUG_LISTEN_ADDR: ":16640"
+      TUG_SEND_TOKEN: ${TUG_SEND_TOKEN:?set TUG_SEND_TOKEN in deploy/.env}
+      TUG_RECEIVE_TOKEN: ${TUG_RECEIVE_TOKEN:?set TUG_RECEIVE_TOKEN in deploy/.env}
+      TUG_LOG_MESSAGES: ${TUG_LOG_MESSAGES:-true}
+      TUG_LOG_LEVEL: ${TUG_LOG_LEVEL:-info}
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      options:
+        max-size: "1m"
+        max-file: "2"

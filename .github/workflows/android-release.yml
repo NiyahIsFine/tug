@@ -1,0 +1,167 @@
+name: Android release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - client/core/**
+      - client/android/**
+      - scripts/build-android-client.ps1
+      - scripts/create-android-icon.ps1
+      - scripts/prepare-android-pub-cache.ps1
+      - scripts/package-android-client.ps1
+      - scripts/release_policy.py
+      - scripts/component_version.py
+      - scripts/publish-release.py
+      - scripts/android_resources.py
+      - scripts/run-script-tests.py
+      - scripts/tests/shared/**
+      - scripts/tests/android/**
+      - .gitattributes
+      - .github/workflows/android-release.yml
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-release-${{ github.event.release.id || github.ref }}
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  build:
+    if: github.event_name != 'release' || !contains(fromJSON('["tug-pre-release", "tug-server-linux-pre-release", "tug-windows-pre-release", "tug-android-pre-release"]'), github.event.release.tag_name)
+    runs-on: windows-2022
+    timeout-minutes: 60
+    env:
+      FLUTTER_VERSION: 3.47.7
+      PUB_CACHE: ${{ github.workspace }}\.local\pub-cache
+      GRADLE_USER_HOME: ${{ github.workspace }}\.local\gradle-home
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - name: Validate publication target
+        run: python scripts/release_policy.py --validate
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3
+        id: java
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: subosito/flutter-action@fd55f4c5af5b953cc57a2be44cb082c8f6635e8e
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+          cache-key: 'tug-flutter-v1-:os:-:channel:-:version:-:arch:-:hash:'
+          pub-cache-key: 'tug-pub-v1-android-:os:-:channel:-:version:-:arch:-:hash:'
+          pub-cache-path: ${{ env.PUB_CACHE }}
+      - name: Restore Gradle dependencies and compiled scripts
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ${{ env.GRADLE_USER_HOME }}/caches/modules-*
+            ${{ env.GRADLE_USER_HOME }}/caches/jars-*
+            ${{ env.GRADLE_USER_HOME }}/caches/transforms-*
+            ${{ env.GRADLE_USER_HOME }}/caches/[0-9]*
+            ${{ env.GRADLE_USER_HOME }}/wrapper/dists
+          key: tug-gradle-dependencies-v2-${{ runner.os }}-${{ runner.arch }}-windows2022-flutter${{ env.FLUTTER_VERSION }}-temurin${{ steps.java.outputs.version }}-${{ hashFiles('client/android/android/**/*.gradle*', 'client/android/android/gradle.properties', 'client/android/android/gradle/wrapper/gradle-wrapper.properties', 'client/android/vendor/**/*.gradle*', 'client/android/vendor/**/gradle.properties', 'client/android/pubspec.lock', 'client/core/pubspec.lock') }}
+      - name: Restore Gradle task outputs
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ${{ env.GRADLE_USER_HOME }}/caches/build-cache-*
+          key: tug-gradle-tasks-v2-${{ runner.os }}-${{ runner.arch }}-windows2022-flutter${{ env.FLUTTER_VERSION }}-temurin${{ steps.java.outputs.version }}-${{ hashFiles('client/android/android/**/*.gradle*', 'client/android/android/gradle.properties', 'client/android/android/gradle/wrapper/gradle-wrapper.properties', 'client/android/vendor/**/*.gradle*', 'client/android/vendor/**/gradle.properties', 'client/android/pubspec.lock', 'client/core/pubspec.lock') }}-${{ github.sha }}
+          restore-keys: |
+            tug-gradle-tasks-v2-${{ runner.os }}-${{ runner.arch }}-windows2022-flutter${{ env.FLUTTER_VERSION }}-temurin${{ steps.java.outputs.version }}-${{ hashFiles('client/android/android/**/*.gradle*', 'client/android/android/gradle.properties', 'client/android/android/gradle/wrapper/gradle-wrapper.properties', 'client/android/vendor/**/*.gradle*', 'client/android/vendor/**/gradle.properties', 'client/android/pubspec.lock', 'client/core/pubspec.lock') }}-
+      - name: Prepare Android toolchain using preaccepted runner licenses
+        run: |
+          flutter config --jdk-dir="$env:JAVA_HOME"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (!$env:ANDROID_HOME) { throw 'The runner must provide ANDROID_HOME.' }
+          if (!(Test-Path -LiteralPath (Join-Path $env:ANDROID_HOME 'licenses/android-sdk-license'))) {
+            throw 'Android SDK licenses must already be accepted on the runner.'
+          }
+          $sdkmanager = Join-Path $env:ANDROID_HOME 'cmdline-tools/latest/bin/sdkmanager.bat'
+          if (!(Test-Path -LiteralPath $sdkmanager)) {
+            $sdkmanager = (Get-ChildItem -LiteralPath (Join-Path $env:ANDROID_HOME 'cmdline-tools') -Filter sdkmanager.bat -Recurse -File |
+              Sort-Object FullName -Descending | Select-Object -First 1).FullName
+          }
+          if (!$sdkmanager) { throw 'Android SDK command-line tools are missing.' }
+          & $sdkmanager "--sdk_root=$env:ANDROID_HOME" 'platforms;android-35' 'platforms;android-36' 'build-tools;36.0.0' 'ndk;28.2.13676358' 'cmake;3.22.1'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test shared and Android release scripts
+        run: python scripts/run-script-tests.py android
+      - name: Prepare Pub cache on the project drive
+        run: |
+          ./scripts/prepare-android-pub-cache.ps1
+          "PUB_CACHE=$env:PUB_CACHE" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Resolve shared core and Android dependencies
+        run: ./scripts/build-android-client.ps1 -FlutterSdk $env:FLUTTER_ROOT -Stage Dependencies
+      - name: Analyze shared core and Android host
+        run: ./scripts/build-android-client.ps1 -FlutterSdk $env:FLUTTER_ROOT -Stage Analyze
+      - name: Test shared core and Android Dart host
+        run: ./scripts/build-android-client.ps1 -FlutterSdk $env:FLUTTER_ROOT -Stage Test
+      - name: Build and verify ARM64, ARM32 and x86_64 Release APKs
+        run: ./scripts/build-android-client.ps1 -FlutterSdk $env:FLUTTER_ROOT -AndroidSdk $env:ANDROID_HOME -Stage Build -GradleProfile
+      - name: Test Android native policies with the Debug unit test variant
+        working-directory: client/android/android
+        run: |
+          ./gradlew.bat :app:testDebugUnitTest --profile
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Package three verified APKs with source metadata and checksums
+        run: ./scripts/package-android-client.ps1
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: android-release-${{ github.sha }}
+          path: dist/releases/android/*
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload Gradle timing reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: android-gradle-profile-${{ github.sha }}-${{ github.run_attempt }}
+          path: client/android/build/**/reports/profile/**
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Stop Gradle daemons before saving caches
+        if: always()
+        working-directory: client/android/android
+        run: |
+          if ((Test-Path -LiteralPath "$env:GRADLE_USER_HOME/wrapper/dists") -and (Test-Path -LiteralPath "./gradlew.bat")) {
+            ./gradlew.bat --stop
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+  publish:
+    needs: build
+    if: github.ref == 'refs/heads/main' || github.event_name == 'release'
+    concurrency:
+      group: tug-publish-${{ github.event.release.id || 'tug-android-pre-release' }}
+      cancel-in-progress: false
+      queue: max
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: android-release-${{ github.sha }}
+          path: dist/releases/android
+      - name: Publish to the eligible rolling or original version release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TUG_MUTABLE_RELEASES_CONFIRMED: ${{ vars.TUG_MUTABLE_RELEASES_CONFIRMED }}
+        run: python3 scripts/publish-release.py android dist/releases/android

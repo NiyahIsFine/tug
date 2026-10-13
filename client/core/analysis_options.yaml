@@ -1,0 +1,8 @@
+include: package:lints/recommended.yaml
+analyzer:
+  errors:
+    discarded_futures: warning
+    prefer_initializing_formals: ignore
+linter:
+  rules:
+    - unawaited_futures

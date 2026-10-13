@@ -1,0 +1,22 @@
+name: tug_android
+description: Android foreground receive host for the shared Tug kernel.
+publish_to: none
+version: 1.0.0
+environment:
+  sdk: '>=3.13.0 <4.0.0'
+dependencies:
+  flutter:
+    sdk: flutter
+  tug_core:
+    path: ../core
+  flutter_foreground_task:
+    path: vendor/flutter_foreground_task
+  flutter_local_notifications: 22.3.1
+  flutter_secure_storage: 11.2.0
+  connectivity_plus: 7.3.1
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: 6.0.0
+flutter:
+  uses-material-design: true
